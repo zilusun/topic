@@ -1,0 +1,136 @@
+---
+title: "topic"
+author: "Zilu Sun"
+date: "2024-11-07"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("tidyverse") 
+library("topicmodels")
+library("tidytext")
+library("lexicon") 
+library("factoextra")  
+library(tm)
+library("wordcloud")
+library(ldatuning)
+```
+
+
+```{r}
+movie_plot <- read.csv("movie_plots.csv")
+custom_stop_words <- tibble(word = c("jack", "jim", "steve", "tom", "jake","john"))
+all_stop_words <- bind_rows(stop_words, custom_stop_words)
+tidy_plots <- movie_plot %>%
+  unnest_tokens(word, Plot) %>%
+  anti_join(all_stop_words)
+
+tidy_plots <- tidy_plots %>%
+  filter(!str_detect(word, "[:punct:]")) %>%
+  filter(!str_detect(word, "[:digit:]"))
+
+dtm <- tidy_plots %>%
+  count(Movie.Name, word) %>%
+  cast_dtm(Movie.Name, word, n)
+```
+```{r}
+word_counts <- tidy_plots %>%
+  count(word, sort = TRUE)
+wordcloud(words = word_counts$word, freq = word_counts$n, max.words = 100, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+
+```{r}
+result <- FindTopicsNumber(
+  dtm,
+  topics = seq(2, 20, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 1234),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+
+FindTopicsNumber_plot(result)
+```
+Griffiths2004: Evaluates the log-likelihood of the LDA model fit; a higher value is better.
+CaoJuan2009: Measures the similarity between topics; a lower value is better, indicating greater distinction between topics.
+Arun2010: Assesses the divergence between topic distribution and word frequency distribution; a lower value is preferred.
+Deveaud2014: Evaluates model quality based on topic coherence; a higher value is better.
+
+```{r}
+#according to FindTopicsNumber_plot(result), best k = 11 or 15
+lda_model <- LDA(dtm, k = 11, control = list(seed = 123))
+lda_gamma <- tidy(lda_model, matrix = "gamma")
+lda_topics <- tidy(lda_model, matrix = "beta")
+
+top_terms <- lda_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+print(top_terms)
+```
+
+#beta plot
+```{r}
+ggplot(top_terms, aes(x = reorder(term, beta), y = beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  labs(x = "Term", y = "Beta", title = "Top Terms for Each Topic") +
+  theme_minimal()
+```
+
+
+```{r}
+gamma_matrix <- lda_gamma %>% pivot_wider(names_from = topic, 
+                                            values_from = gamma)%>%
+  drop_na()
+gamma_matrix_numeric <- gamma_matrix %>%
+  select(where(is.numeric))
+
+fviz_nbclust(gamma_matrix_numeric, kmeans, method = "silhouette")
+
+cluster <- kmeans(gamma_matrix_numeric, centers = 9)
+fviz_cluster(cluster, data = gamma_matrix_numeric)
+```
+
+
+
+Based on the top 10 keywords for each category, the five classes are categorized as:
+
+Family Drama, History, Adventure, Romance & Morality, and Crime.
+
+```{r}
+dominant_topic <- tibble(
+  Movie.Name = rownames(dtm),
+  dominant_topic = apply(gamma_matrix, 1, which.max)
+)
+movie_plot_with_topic <- movie_plot %>%
+  left_join(dominant_topic, by = "Movie.Name")
+movie_plot_with_topic <- movie_plot_with_topic %>%
+  mutate(dominant_topic = case_when(
+   dominant_topic == 1 ~ "Western and Family Life",
+    dominant_topic == 2 ~ "Holidays and Romance",
+    dominant_topic == 3 ~ "Crime and Revenge",
+    dominant_topic == 4 ~ "Sports and Competition",
+    dominant_topic == 5 ~ "History and Art",
+    dominant_topic == 6 ~ "Western and Adventure",
+    dominant_topic == 7 ~ "Fantasy and Quest",
+    dominant_topic == 8 ~ "Urban Life and Conflict",
+    dominant_topic == 9 ~ "Family and Struggles",
+    dominant_topic == 10 ~ "War and Humanity",
+    dominant_topic == 11 ~ "Aliens and Science Fiction",
+    TRUE ~ NA_character_
+  ))
+
+write.csv(movie_plot_with_topic, "movie_with_topic.csv", row.names = FALSE)
+
+
+```
+
